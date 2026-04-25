@@ -1,0 +1,20 @@
+{
+  "name": "devflow-engine",
+  "version": "0.1.0",
+  "private": true,
+  "description": "AI-driven requirement delivery pipeline engine for the DevFlow competition.",
+  "workspaces": [
+    "apps/*",
+    "packages/*"
+  ],
+  "scripts": {
+    "dev:api": "npm run build -w @devflow/shared && npm run dev -w @devflow/api",
+    "dev:web": "npm run build -w @devflow/shared && npm run dev -w @devflow/web",
+    "build": "npm run build -w @devflow/shared && npm run build -w @devflow/api && npm run build -w @devflow/web",
+    "typecheck": "npm run build -w @devflow/shared && npm run typecheck -w @devflow/api && npm run typecheck -w @devflow/web",
+    "test": "npm run test --workspaces --if-present"
+  },
+  "engines": {
+    "node": ">=20"
+  }
+}

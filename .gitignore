@@ -1,0 +1,19 @@
+node_modules/
+dist/
+build/
+.vite/
+.turbo/
+.env
+.env.*
+!.env.example
+coverage/
+*.log
+.DS_Store
+Thumbs.db
+*.pem
+*.key
+*.p12
+*.pfx
+
+# Local competition brief; keep it out of the public repository.
+/*.docx
