@@ -5,7 +5,9 @@ import Fastify from "fastify";
 import type { FastifyError } from "fastify";
 import { createAgentProvider } from "./agents/agentProvider.js";
 import type { ApiConfig } from "./config.js";
+import { createCodeContextService } from "./domain/codeContextService.js";
 import { PipelineRunner } from "./domain/pipelineRunner.js";
+import { createWorkspaceChangeService } from "./domain/workspaceChangeService.js";
 import { createNotifier } from "./integrations/notifier.js";
 import { registerPipelineRoutes } from "./routes/pipelines.js";
 import { MemoryPipelineStore } from "./store/memoryStore.js";
@@ -44,7 +46,13 @@ export async function buildServer(config: ApiConfig) {
   }));
 
   const store = new MemoryPipelineStore();
-  const runner = new PipelineRunner(store, createAgentProvider(config), createNotifier(config));
+  const runner = new PipelineRunner(
+    store,
+    createAgentProvider(config),
+    createNotifier(config),
+    createWorkspaceChangeService(),
+    createCodeContextService()
+  );
   await registerPipelineRoutes(app, store, runner);
 
   app.setErrorHandler((error: FastifyError, _request, reply) => {

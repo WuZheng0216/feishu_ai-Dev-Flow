@@ -39,6 +39,38 @@ export interface StageStream {
   isComplete: boolean;
 }
 
+export interface CodeContextTreeEntry {
+  path: string;
+  kind: "file" | "directory";
+  sizeBytes?: number;
+}
+
+export interface CodeContextFile {
+  path: string;
+  content: string;
+  sizeBytes: number;
+  truncated: boolean;
+}
+
+export interface CodeContextSkippedItem {
+  path: string;
+  reason: string;
+}
+
+export interface CodeContextSnapshot {
+  targetRepoPath: string;
+  collectedAt: string;
+  tree: CodeContextTreeEntry[];
+  files: CodeContextFile[];
+  skipped: CodeContextSkippedItem[];
+  budget: {
+    maxFiles: number;
+    maxFileBytes: number;
+    maxTotalBytes: number;
+    usedBytes: number;
+  };
+}
+
 export interface PipelineStage {
   id: string;
   name: string;
@@ -52,6 +84,7 @@ export interface PipelineStage {
   completedAt?: string;
   artifact?: StageArtifact;
   stream?: StageStream;
+  codeContext?: CodeContextSnapshot;
   humanDecision?: HumanDecision;
 }
 
@@ -87,6 +120,7 @@ export interface PipelineRun {
   name: string;
   requirement: string;
   targetRepoPath?: string;
+  contextPaths?: string[];
   status: PipelineStatus;
   stages: PipelineStage[];
   createdAt: string;
@@ -101,6 +135,7 @@ export interface CreatePipelineRequest {
   name?: string;
   requirement: string;
   targetRepoPath?: string;
+  contextPaths?: string[];
 }
 
 export interface RejectCheckpointRequest {

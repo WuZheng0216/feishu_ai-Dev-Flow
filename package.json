@@ -12,7 +12,9 @@
     "dev:web": "npm run build -w @devflow/shared && npm run dev -w @devflow/web",
     "build": "npm run build -w @devflow/shared && npm run build -w @devflow/api && npm run build -w @devflow/web",
     "typecheck": "npm run build -w @devflow/shared && npm run typecheck -w @devflow/api && npm run typecheck -w @devflow/web",
-    "test": "npm run test --workspaces --if-present"
+    "test": "npm run test --workspaces --if-present && npm run test:demo",
+    "test:demo": "node --import tsx --test workspace/demo/src/Home.test.tsx",
+    "build:demo": "tsc -p workspace/demo/tsconfig.json && vite build workspace/demo"
   },
   "engines": {
     "node": ">=20"

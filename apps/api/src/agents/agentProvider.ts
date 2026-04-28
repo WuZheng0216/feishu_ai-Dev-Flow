@@ -1,4 +1,10 @@
-import type { AgentRole, PipelineRun, PipelineStage, StageArtifact } from "@devflow/shared";
+import type {
+  AgentRole,
+  CodeContextSnapshot,
+  PipelineRun,
+  PipelineStage,
+  StageArtifact
+} from "@devflow/shared";
 import type { ApiConfig } from "../config.js";
 import { getAgentPromptProfile } from "./agentPrompts.js";
 
@@ -6,6 +12,7 @@ export interface AgentExecutionInput {
   pipeline: PipelineRun;
   stage: PipelineStage;
   previousArtifacts: StageArtifact[];
+  codeContext?: CodeContextSnapshot;
 }
 
 export interface AgentStreamUpdate {
@@ -34,7 +41,7 @@ export class MockAgentProvider implements AgentProvider {
   readonly name = "mock";
 
   async execute(
-    { pipeline, stage, previousArtifacts }: AgentExecutionInput,
+    { pipeline, stage, previousArtifacts, codeContext }: AgentExecutionInput,
     callbacks?: AgentExecutionCallbacks
   ): Promise<StageArtifact> {
     await new Promise((resolve) => setTimeout(resolve, 450));
@@ -52,6 +59,9 @@ export class MockAgentProvider implements AgentProvider {
         "",
         "### 输入上下文",
         previous || "- 当前为第一个 Agent 阶段。",
+        "",
+        "### 代码库上下文",
+        formatCodeContextSummary(codeContext),
         "",
         "### Agent 产物",
         buildMarkdown(role, pipeline),
@@ -118,7 +128,7 @@ class DoubaoAgentProvider implements AgentProvider {
   }
 
   private async requestChatCompletion(
-    { pipeline, stage, previousArtifacts }: AgentExecutionInput,
+    { pipeline, stage, previousArtifacts, codeContext }: AgentExecutionInput,
     title: string,
     callbacks?: AgentExecutionCallbacks
   ): Promise<string> {
@@ -145,7 +155,7 @@ class DoubaoAgentProvider implements AgentProvider {
             },
             {
               role: "user",
-              content: buildAgentPrompt(pipeline, stage, previousArtifacts, title)
+              content: buildAgentPrompt(pipeline, stage, previousArtifacts, title, codeContext)
             }
           ]
         })
@@ -278,7 +288,8 @@ function buildAgentPrompt(
   pipeline: PipelineRun,
   stage: PipelineStage,
   previousArtifacts: StageArtifact[],
-  title: string
+  title: string,
+  codeContext?: CodeContextSnapshot
 ): string {
   const previous = previousArtifacts
     .map((artifact, index) =>
@@ -301,14 +312,70 @@ function buildAgentPrompt(
     "上游上下文：",
     previous || "当前为第一个 Agent 阶段。",
     "",
+    "代码库上下文：",
+    formatCodeContextForPrompt(codeContext),
+    "",
     "输出要求：",
     "- 直接输出 Markdown，不要输出 JSON。",
     "- 第一行使用一级标题。",
     "- 正文包含可执行建议、风险、验证方式。",
     "- 不要实际声称已经修改文件，除非输入上下文明确包含真实 diff 或执行结果。",
+    "- 如果代码库上下文不足，请明确列出缺失路径，不要臆测文件内容。",
     "",
     "本角色必须覆盖：",
     ...getStageChecklist(stage).map((item) => `- ${item}`)
+  ].join("\n");
+}
+
+function formatCodeContextSummary(codeContext?: CodeContextSnapshot): string {
+  if (!codeContext) {
+    return "- 未收集代码库上下文。";
+  }
+
+  return [
+    `- 目标仓库：${codeContext.targetRepoPath}`,
+    `- 目录项：${codeContext.tree.length}`,
+    `- 已读取文件：${codeContext.files.map((file) => file.path).join(", ") || "无"}`,
+    `- 跳过项：${codeContext.skipped.length}`,
+    `- 上下文预算：${codeContext.budget.usedBytes}/${codeContext.budget.maxTotalBytes} bytes`
+  ].join("\n");
+}
+
+function formatCodeContextForPrompt(codeContext?: CodeContextSnapshot): string {
+  if (!codeContext) {
+    return "未收集代码库上下文。";
+  }
+
+  const tree = codeContext.tree
+    .slice(0, 80)
+    .map((entry) => `- ${entry.kind === "directory" ? "dir" : "file"} ${entry.path}`)
+    .join("\n");
+  const files = codeContext.files
+    .map((file) =>
+      [
+        `--- BEGIN FILE ${file.path} (${file.sizeBytes} bytes${file.truncated ? ", truncated" : ""}) ---`,
+        file.content,
+        `--- END FILE ${file.path} ---`
+      ].join("\n")
+    )
+    .join("\n\n");
+  const skipped = codeContext.skipped
+    .map((item) => `- ${item.path}: ${item.reason}`)
+    .join("\n");
+
+  return [
+    `目标仓库：${codeContext.targetRepoPath}`,
+    `收集时间：${codeContext.collectedAt}`,
+    `预算：${codeContext.budget.usedBytes}/${codeContext.budget.maxTotalBytes} bytes`,
+    "",
+    "目录树摘要：",
+    tree || "无目录树信息。",
+    "",
+    "已读取文件内容：",
+    files || "未读取任何文件内容。",
+    "",
+    "跳过或缺失项：",
+    skipped || "无。"
   ].join("\n");
 }
 

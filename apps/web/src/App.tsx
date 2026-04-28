@@ -11,14 +11,17 @@ import {
 
 const defaultRequirement =
   "请为演示站点首页增加一个“比赛亮点”区域，包含三个卡片：AI Pipeline、Human Review、自动交付。要求视觉清晰、文案简短，并补充基础测试。";
+const defaultContextPaths = ["src/Home.tsx", "src/styles.css", "src/Home.test.tsx", "package.json"].join("\n");
 
 export default function App() {
   const [requirement, setRequirement] = useState(defaultRequirement);
+  const [contextPaths, setContextPaths] = useState(defaultContextPaths);
   const [pipeline, setPipeline] = useState<PipelineRun | null>(null);
   const [pipelines, setPipelines] = useState<PipelineRun[]>([]);
   const [selectedStageId, setSelectedStageId] = useState<string | null>(null);
   const [followCurrentStage, setFollowCurrentStage] = useState(true);
   const [rejectReason, setRejectReason] = useState("方案还需要补充风险控制和回滚策略。");
+  const [nowTick, setNowTick] = useState(() => Date.now());
   const [isBusy, setIsBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -27,21 +30,49 @@ export default function App() {
   }, []);
 
   useEffect(() => {
-    if (!pipeline || ["completed", "failed", "cancelled", "waiting_for_human"].includes(pipeline.status)) {
+    const timer = window.setInterval(() => setNowTick(Date.now()), 200);
+    return () => window.clearInterval(timer);
+  }, []);
+
+  useEffect(() => {
+    if (!pipeline?.id || ["completed", "failed", "cancelled", "waiting_for_human"].includes(pipeline.status)) {
       return;
     }
 
+    let isCancelled = false;
+    let isFetching = false;
+    let ticks = 0;
     const timer = window.setInterval(async () => {
-      const latest = await getPipeline(pipeline.id);
-      setPipeline(latest);
-      if (followCurrentStage) {
-        setSelectedStageId(latest.currentStageId ?? latest.stages[0]?.id ?? null);
+      if (isFetching) {
+        return;
       }
-      await refreshList();
-    }, 500);
 
-    return () => window.clearInterval(timer);
-  }, [followCurrentStage, pipeline]);
+      isFetching = true;
+      try {
+        const latest = await getPipeline(pipeline.id);
+        if (isCancelled) {
+          return;
+        }
+
+        setPipeline(latest);
+        if (followCurrentStage) {
+          setSelectedStageId(latest.currentStageId ?? latest.stages[0]?.id ?? null);
+        }
+
+        ticks += 1;
+        if (ticks % 4 === 0 || ["completed", "failed", "cancelled", "waiting_for_human"].includes(latest.status)) {
+          await refreshList();
+        }
+      } finally {
+        isFetching = false;
+      }
+    }, 250);
+
+    return () => {
+      isCancelled = true;
+      window.clearInterval(timer);
+    };
+  }, [followCurrentStage, pipeline?.id, pipeline?.status]);
 
   async function refreshList() {
     setPipelines(await listPipelines());
@@ -52,7 +83,8 @@ export default function App() {
       const created = await createPipeline({
         name: "比赛演示 Pipeline",
         requirement,
-        targetRepoPath: "workspace/demo"
+        targetRepoPath: "workspace/demo",
+        contextPaths: parseContextPaths(contextPaths)
       });
       const started = await startPipeline(created.id);
       setPipeline(started);
@@ -140,6 +172,15 @@ export default function App() {
             <h2>输入需求</h2>
           </div>
           <textarea value={requirement} onChange={(event) => setRequirement(event.target.value)} />
+          <div className="fieldGroup">
+            <label htmlFor="contextPaths">上下文路径</label>
+            <textarea
+              id="contextPaths"
+              className="compactTextarea"
+              value={contextPaths}
+              onChange={(event) => setContextPaths(event.target.value)}
+            />
+          </div>
           <button type="button" onClick={handleCreateAndStart} disabled={isBusy || requirement.length < 8}>
             创建并启动 Pipeline
           </button>
@@ -233,7 +274,7 @@ export default function App() {
                     </div>
                     <div>
                       <dt>耗时</dt>
-                      <dd>{formatDuration(selectedStage.startedAt, selectedStage.completedAt, selectedStage.status)}</dd>
+                      <dd>{formatDuration(selectedStage.startedAt, selectedStage.completedAt, selectedStage.status, nowTick)}</dd>
                     </div>
                   </dl>
 
@@ -263,6 +304,25 @@ export default function App() {
                       人工决策：{selectedStage.humanDecision.action}
                       {selectedStage.humanDecision.reason ? `，原因：${selectedStage.humanDecision.reason}` : ""}
                     </p>
+                  ) : null}
+
+                  {selectedStage.codeContext ? (
+                    <div className="contextPreview">
+                      <h4>代码库上下文</h4>
+                      <p>
+                        已读取 {selectedStage.codeContext.files.length} 个文件，
+                        {selectedStage.codeContext.budget.usedBytes}/
+                        {selectedStage.codeContext.budget.maxTotalBytes} bytes。
+                      </p>
+                      <ul>
+                        {selectedStage.codeContext.files.map((file) => (
+                          <li key={file.path}>
+                            {file.path}
+                            {file.truncated ? "（已截断）" : ""}
+                          </li>
+                        ))}
+                      </ul>
+                    </div>
                   ) : null}
 
                   {selectedStage.artifact ? (
@@ -339,7 +399,12 @@ function formatTime(value?: string): string {
   }).format(new Date(value));
 }
 
-function formatDuration(startedAt?: string, completedAt?: string, status?: PipelineStage["status"]): string {
+function formatDuration(
+  startedAt?: string,
+  completedAt?: string,
+  status?: PipelineStage["status"],
+  now = Date.now()
+): string {
   if (!startedAt) {
     return "未开始";
   }
@@ -348,7 +413,7 @@ function formatDuration(startedAt?: string, completedAt?: string, status?: Pipel
     completedAt || status === "running" || status === "waiting_for_human"
       ? completedAt
         ? Date.parse(completedAt)
-        : Date.now()
+        : now
       : Date.parse(startedAt);
   const durationMs = Math.max(0, end - Date.parse(startedAt));
 
@@ -364,4 +429,11 @@ function formatDetails(details: NonNullable<PipelineEvent["details"]>): string {
     .filter(([, value]) => value !== null && value !== "")
     .map(([key, value]) => `${key}: ${value}`)
     .join(" · ");
+}
+
+function parseContextPaths(value: string): string[] {
+  return value
+    .split(/\r?\n|,/)
+    .map((item) => item.trim())
+    .filter(Boolean);
 }

@@ -3,6 +3,10 @@ import { getAgentPromptProfile } from "../agents/agentPrompts.js";
 import type { AgentProvider } from "../agents/agentProvider.js";
 import type { DevFlowNotifier } from "../integrations/notifier.js";
 import type { MemoryPipelineStore } from "../store/memoryStore.js";
+import type { CodeContextService } from "./codeContextService.js";
+import { NoopCodeContextService } from "./codeContextService.js";
+import type { WorkspaceChangeResult, WorkspaceChangeService } from "./workspaceChangeService.js";
+import { NoopWorkspaceChangeService } from "./workspaceChangeService.js";
 
 export class PipelineRunner {
   private readonly activeRuns = new Set<string>();
@@ -10,13 +14,15 @@ export class PipelineRunner {
   constructor(
     private readonly store: MemoryPipelineStore,
     private readonly agentProvider: AgentProvider,
-    private readonly notifier: DevFlowNotifier
+    private readonly notifier: DevFlowNotifier,
+    private readonly workspaceChangeService: WorkspaceChangeService = new NoopWorkspaceChangeService(),
+    private readonly codeContextService: CodeContextService = new NoopCodeContextService()
   ) {}
 
   start(pipelineId: string): PipelineRun {
     const pipeline = this.requirePipeline(pipelineId);
 
-    if (pipeline.status === "cancelled" || pipeline.status === "completed") {
+    if (["cancelled", "completed", "failed", "waiting_for_human"].includes(pipeline.status)) {
       return pipeline;
     }
 
@@ -65,6 +71,8 @@ export class PipelineRunner {
 
   approve(pipelineId: string, stageId: string): PipelineRun {
     const pipeline = this.requirePipeline(pipelineId);
+    this.requireWaitingCheckpoint(pipeline, stageId);
+
     const now = new Date().toISOString();
     const decision: HumanDecision = { action: "approved", decidedAt: now };
 
@@ -101,15 +109,60 @@ export class PipelineRunner {
 
   reject(pipelineId: string, stageId: string, reason: string): PipelineRun {
     const pipeline = this.requirePipeline(pipelineId);
-    const checkpoint = pipeline.stages.find((stage) => stage.id === stageId);
-
-    if (!checkpoint || checkpoint.kind !== "checkpoint") {
-      throw new Error(`Checkpoint ${stageId} not found.`);
-    }
+    const checkpoint = this.requireWaitingCheckpoint(pipeline, stageId);
 
     const rollbackStageId = checkpoint.dependsOn?.[0];
     const rollbackIndex = pipeline.stages.findIndex((stage) => stage.id === rollbackStageId);
     const now = new Date().toISOString();
+
+    if (rollbackIndex < 0) {
+      throw new PipelineStateError(`Checkpoint ${stageId} does not define a retry target.`);
+    }
+
+    const rollbackStage = pipeline.stages[rollbackIndex];
+    if (rollbackStage.retryCount >= rollbackStage.maxRetries) {
+      const decision: HumanDecision = { action: "rejected", reason, decidedAt: now };
+      const rejectedStages = updateStage(pipeline.stages, stageId, {
+        status: "rejected",
+        completedAt: now,
+        humanDecision: decision
+      });
+
+      return this.store.save(
+        appendEvent(
+          appendEvent(
+            {
+              ...pipeline,
+              stages: rejectedStages,
+              status: "failed",
+              currentStageId: rollbackStage.id,
+              completedAt: now
+            },
+            {
+              type: "checkpoint_rejected",
+              message: `人工审批已驳回，但 ${rollbackStage.name} 已达到最大重试次数。`,
+              createdAt: now,
+              stageId,
+              details: {
+                reason,
+                retryCount: rollbackStage.retryCount,
+                maxRetries: rollbackStage.maxRetries
+              }
+            }
+          ),
+          {
+            type: "stage_failed",
+            message: `阶段失败：${rollbackStage.name} 已达到最大重试次数。`,
+            createdAt: now,
+            stageId: rollbackStage.id,
+            details: {
+              retryCount: rollbackStage.retryCount,
+              maxRetries: rollbackStage.maxRetries
+            }
+          }
+        )
+      );
+    }
 
     const stages = pipeline.stages.map((stage, index) => {
       if (rollbackIndex >= 0 && index >= rollbackIndex) {
@@ -253,13 +306,27 @@ export class PipelineRunner {
       const previousArtifacts = running.stages
         .filter((item) => item.artifact && item.id !== stage.id)
         .map((item) => item.artifact as StageArtifact);
+      const codeContext = await this.codeContextService.collect({
+        pipeline: running,
+        stage,
+        previousArtifacts
+      });
+
+      if (codeContext) {
+        running = this.store.save({
+          ...running,
+          stages: updateStage(running.stages, stage.id, {
+            codeContext
+          })
+        });
+      }
 
       let lastStreamContent = "";
       let lastStreamSaveAt = 0;
       const saveStream = (content: string, isComplete = false) => {
         const now = Date.now();
         lastStreamContent = content;
-        if (!isComplete && now - lastStreamSaveAt < 180) {
+        if (!isComplete && now - lastStreamSaveAt < 80) {
           return;
         }
 
@@ -267,12 +334,21 @@ export class PipelineRunner {
         running = this.updateStageStream(running.id, stage.id, content, isComplete);
       };
 
-      const artifact = await this.agentProvider.execute(
-        { pipeline: running, stage, previousArtifacts },
+      let artifact = await this.agentProvider.execute(
+        { pipeline: running, stage, previousArtifacts, codeContext },
         {
           onStream: ({ content }) => saveStream(content)
         }
       );
+
+      if (stage.id === "code-generation") {
+        const workspaceChange = await this.workspaceChangeService.applyCodeGeneration(running);
+        if (workspaceChange) {
+          artifact = appendWorkspaceChangeArtifact(artifact, workspaceChange);
+          saveStream(artifact.markdown, true);
+        }
+      }
+
       const completedAt = new Date().toISOString();
 
       running = this.requirePipeline(running.id);
@@ -366,10 +442,28 @@ export class PipelineRunner {
     const pipeline = this.store.get(pipelineId);
 
     if (!pipeline) {
-      throw new Error(`Pipeline ${pipelineId} not found.`);
+      throw new PipelineStateError(`Pipeline ${pipelineId} not found.`, 404);
     }
 
     return pipeline;
+  }
+
+  private requireWaitingCheckpoint(pipeline: PipelineRun, stageId: string): PipelineStage {
+    const stage = pipeline.stages.find((item) => item.id === stageId);
+
+    if (!stage || stage.kind !== "checkpoint") {
+      throw new PipelineStateError(`Checkpoint ${stageId} not found.`, 404);
+    }
+
+    if (
+      pipeline.status !== "waiting_for_human" ||
+      pipeline.currentStageId !== stageId ||
+      stage.status !== "waiting_for_human"
+    ) {
+      throw new PipelineStateError(`Checkpoint ${stageId} is not waiting for human decision.`);
+    }
+
+    return stage;
   }
 
   private async safeNotify(send: () => Promise<void>): Promise<void> {
@@ -378,6 +472,12 @@ export class PipelineRunner {
     } catch (error) {
       console.warn("[notify] failed", error);
     }
+  }
+}
+
+class PipelineStateError extends Error {
+  constructor(message: string, readonly statusCode = 409) {
+    super(message);
   }
 }
 
@@ -427,8 +527,40 @@ function resetStageForRetry(stage: PipelineStage, incrementRetry: boolean): Pipe
     artifact: undefined,
     stream: undefined,
     humanDecision: undefined,
+    codeContext: undefined,
     startedAt: undefined,
     completedAt: undefined,
     retryCount: incrementRetry ? stage.retryCount + 1 : stage.retryCount
+  };
+}
+
+function appendWorkspaceChangeArtifact(
+  artifact: StageArtifact,
+  workspaceChange: WorkspaceChangeResult
+): StageArtifact {
+  const changedFileList =
+    workspaceChange.changedFiles.length > 0
+      ? workspaceChange.changedFiles.map((file) => `- ${file}`).join("\n")
+      : "- 无新增文件变更";
+  const diffSection = workspaceChange.diff
+    ? ["```diff", workspaceChange.diff, "```"].join("\n")
+    : "本次运行没有产生新的 diff，目标工作区内容已经匹配生成结果。";
+
+  return {
+    ...artifact,
+    summary: `${artifact.summary} ${workspaceChange.summary}`,
+    markdown: [
+      artifact.markdown,
+      "",
+      "## 真实工作区变更",
+      "",
+      workspaceChange.summary,
+      "",
+      "### 修改文件",
+      changedFileList,
+      "",
+      "### Diff",
+      diffSection
+    ].join("\n")
   };
 }

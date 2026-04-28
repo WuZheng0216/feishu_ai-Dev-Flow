@@ -10,6 +10,8 @@ AI 驱动的需求交付流程引擎比赛项目骨架。
 - 多阶段状态机：需求分析、方案设计、代码生成、测试生成、代码评审、交付集成。
 - 至少 2 个 Human-in-the-Loop 检查点：方案审批、最终评审。
 - Agent 抽象层：默认 Mock Agent，可后续替换为真实 LLM Provider。
+- 代码库上下文读取：创建 Pipeline 时可指定 `contextPaths`，Agent 执行前会读取目标仓库目录树和有限文件内容。
+- 受控代码生成：`code-generation` 阶段会对 `workspace/demo` 写入真实文件变更，并在阶段产物中展示 diff。
 - REST API + Swagger UI。
 - React 控制台：输入需求、观察阶段流转、审批/驳回检查点。
 - Docker Compose 一键启动草案。
@@ -33,13 +35,14 @@ npm.cmd run dev:web
 ## 验证
 
 ```powershell
+npm.cmd run test
 npm.cmd run typecheck
 npm.cmd run build
+npm.cmd run build:demo
 ```
 
 ## 切换到豆包 / 火山方舟
 
-默认使用 Mock Agent。要调用真实豆包模型，在 `.env` 或当前 PowerShell 会话中配置：
 
 ```powershell
 $env:LLM_PROVIDER="doubao"
@@ -56,6 +59,19 @@ npm.cmd run dev:web
 ```
 
 然后访问 `http://localhost:5173` 创建并启动 Pipeline。此时各 Agent 阶段会调用豆包生成真实阶段产物；Human-in-the-Loop 审批流程仍由本系统状态机控制。
+
+## 代码库上下文
+
+默认目标仓库是 `workspace/demo`。控制台的“上下文路径”会随创建请求提交，后端只允许读取 `workspace/*` 下的文本文件，并跳过 `node_modules`、`.git`、`dist` 等目录。
+
+推荐上下文路径：
+
+```text
+src/Home.tsx
+src/styles.css
+src/Home.test.tsx
+package.json
+```
 
 ## 推荐演示需求
 

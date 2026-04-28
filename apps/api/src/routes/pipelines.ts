@@ -8,7 +8,8 @@ import type { MemoryPipelineStore } from "../store/memoryStore.js";
 const createPipelineSchema = z.object({
   name: z.string().min(1).optional(),
   requirement: z.string().min(8),
-  targetRepoPath: z.string().min(1).optional()
+  targetRepoPath: z.string().min(1).optional(),
+  contextPaths: z.array(z.string().min(1)).max(12).optional()
 });
 
 const rejectSchema = z.object({
@@ -40,6 +41,7 @@ export async function registerPipelineRoutes(
       name: body.name ?? "AI DevFlow Pipeline",
       requirement: body.requirement,
       targetRepoPath: body.targetRepoPath,
+      contextPaths: body.contextPaths,
       status: "draft",
       stages: createDefaultStages(),
       createdAt: now,
