@@ -1,10 +1,77 @@
-import type { AgentRole } from "@devflow/shared";
+import type { AgentRole, AgentSkill, AgentSkillProfile } from "@devflow/shared";
 
 export interface AgentPromptProfile {
   title: string;
   systemPrompt: string;
   outputChecklist: string[];
 }
+
+export const agentSkillProfiles: Record<AgentSkill, AgentSkillProfile> = {
+  requirement_structuring: {
+    id: "requirement_structuring",
+    name: "需求结构化",
+    description: "把自然语言目标拆成背景、范围、约束、验收标准和待确认问题。"
+  },
+  code_context_reading: {
+    id: "code_context_reading",
+    name: "代码库上下文读取",
+    description: "基于目录树、指定文件和上游产物提到的路径理解目标仓库现状。"
+  },
+  solution_decomposition: {
+    id: "solution_decomposition",
+    name: "方案拆解",
+    description: "把复杂需求拆成低耦合、可评审、可落地的实现步骤。"
+  },
+  parallel_task_planning: {
+    id: "parallel_task_planning",
+    name: "并行子任务规划",
+    description: "识别互不冲突的工作 scope，并给不同 Agent 分配可并发执行的子任务。"
+  },
+  diff_planning: {
+    id: "diff_planning",
+    name: "Diff 规划",
+    description: "按文件说明变更目的、关键逻辑和预期 diff，便于后续审查。"
+  },
+  workspace_editing: {
+    id: "workspace_editing",
+    name: "工作区写入",
+    description: "在受控范围内生成或调整目标 workspace 文件，并保留变更摘要。"
+  },
+  test_strategy: {
+    id: "test_strategy",
+    name: "测试策略",
+    description: "设计主路径、边界情况、失败路径和回归验证命令。"
+  },
+  risk_review: {
+    id: "risk_review",
+    name: "风险评审",
+    description: "从正确性、安全性、可维护性和演示风险角度审查产物。"
+  },
+  preview_refinement: {
+    id: "preview_refinement",
+    name: "预览反馈微调",
+    description: "把人在预览界面选中的元素和自然语言反馈转成可控 UI 调整。"
+  },
+  delivery_summary: {
+    id: "delivery_summary",
+    name: "交付摘要",
+    description: "汇总已完成事项、验证情况、遗留风险和下一步交付说明。"
+  }
+};
+
+export const roleDefaultSkills: Record<AgentRole, AgentSkill[]> = {
+  requirements_analyst: ["requirement_structuring", "code_context_reading"],
+  solution_architect: [
+    "code_context_reading",
+    "solution_decomposition",
+    "parallel_task_planning",
+    "risk_review"
+  ],
+  coder: ["code_context_reading", "diff_planning", "workspace_editing"],
+  test_engineer: ["code_context_reading", "test_strategy"],
+  reviewer: ["code_context_reading", "risk_review"],
+  delivery_manager: ["delivery_summary", "risk_review"]
+};
 
 export const agentPromptProfiles: Record<AgentRole, AgentPromptProfile> = {
   requirements_analyst: {
@@ -107,4 +174,12 @@ export const agentPromptProfiles: Record<AgentRole, AgentPromptProfile> = {
 
 export function getAgentPromptProfile(role: AgentRole): AgentPromptProfile {
   return agentPromptProfiles[role];
+}
+
+export function getAgentSkillProfile(skill: AgentSkill): AgentSkillProfile {
+  return agentSkillProfiles[skill];
+}
+
+export function getDefaultSkillsForRole(role: AgentRole): AgentSkill[] {
+  return roleDefaultSkills[role];
 }

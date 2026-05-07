@@ -1,4 +1,6 @@
+import { resolve } from "node:path";
 import cors from "@fastify/cors";
+import multipart from "@fastify/multipart";
 import swagger from "@fastify/swagger";
 import swaggerUi from "@fastify/swagger-ui";
 import Fastify from "fastify";
@@ -8,6 +10,7 @@ import type { ApiConfig } from "./config.js";
 import { createCodeContextService } from "./domain/codeContextService.js";
 import { PipelineRunner } from "./domain/pipelineRunner.js";
 import { createWorkspaceChangeService } from "./domain/workspaceChangeService.js";
+import { findProjectRoot } from "./domain/workspacePaths.js";
 import { createNotifier } from "./integrations/notifier.js";
 import { registerPipelineRoutes } from "./routes/pipelines.js";
 import { MemoryPipelineStore } from "./store/memoryStore.js";
@@ -19,6 +22,14 @@ export async function buildServer(config: ApiConfig) {
 
   await app.register(cors, {
     origin: true
+  });
+
+  await app.register(multipart, {
+    limits: {
+      files: 5,
+      fileSize: 5 * 1024 * 1024,
+      fields: 24
+    }
   });
 
   await app.register(swagger, {
@@ -45,7 +56,7 @@ export async function buildServer(config: ApiConfig) {
     provider: config.llmProvider
   }));
 
-  const store = new MemoryPipelineStore();
+  const store = new MemoryPipelineStore(resolve(findProjectRoot(process.cwd()), ".devflow", "pipelines.json"));
   const runner = new PipelineRunner(
     store,
     createAgentProvider(config),

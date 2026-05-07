@@ -38,8 +38,8 @@ export function loadConfig(): ApiConfig {
         process.env.ARK_MODEL ||
         undefined,
       temperature: readNumber(process.env.DOUBAO_TEMPERATURE, 0.2),
-      maxTokens: readInteger(process.env.DOUBAO_MAX_TOKENS, 1200),
-      timeoutMs: readInteger(process.env.DOUBAO_TIMEOUT_MS, 60000)
+      maxTokens: readInteger(process.env.DOUBAO_MAX_TOKENS, 8000),
+      timeoutMs: readInteger(process.env.DOUBAO_TIMEOUT_MS, 120000)
     },
     feishuWebhookUrl: process.env.FEISHU_WEBHOOK_URL || undefined
   };

@@ -195,15 +195,24 @@ function getStageDefaultPaths(stageId: string): string[] {
   }
 
   if (stageId === "solution-design") {
-    return [...common, "src/Home.tsx", "src/styles.css"];
+    return [...common, "src/Home.tsx", "src/styles.css", "src/types.ts", "src/data/championsLeague.ts", "src/data/worldCup.ts"];
   }
 
   if (stageId === "code-generation") {
-    return ["src/Home.tsx", "src/Home.test.tsx", "src/styles.css", "package.json"];
+    return [
+      "src/Home.tsx",
+      "src/Home.test.tsx",
+      "src/styles.css",
+      "src/types.ts",
+      "src/data/championsLeague.ts",
+      "src/data/worldCup.ts",
+      "src/constants.ts",
+      "package.json"
+    ];
   }
 
   if (stageId === "test-generation" || stageId === "code-review") {
-    return ["src/Home.tsx", "src/Home.test.tsx", "package.json"];
+    return ["src/Home.tsx", "src/Home.test.tsx", "src/types.ts", "src/data/championsLeague.ts", "src/data/worldCup.ts", "package.json"];
   }
 
   return common;

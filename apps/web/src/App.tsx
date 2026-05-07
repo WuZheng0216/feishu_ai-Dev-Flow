@@ -1,10 +1,17 @@
-import type { PipelineEvent, PipelineRun, PipelineStage } from "@devflow/shared";
-import { useEffect, useState } from "react";
+import type {
+  AgentSkill,
+  PipelineEvent,
+  PipelineRun,
+  PipelineStage,
+  SelectedPreviewElement
+} from "@devflow/shared";
+import { useEffect, useRef, useState } from "react";
 import {
   approveCheckpoint,
   createPipeline,
   getPipeline,
   listPipelines,
+  refinePipeline,
   rejectCheckpoint,
   startPipeline
 } from "./api";
@@ -12,15 +19,27 @@ import {
 const defaultRequirement =
   "请为演示站点首页增加一个“比赛亮点”区域，包含三个卡片：AI Pipeline、Human Review、自动交付。要求视觉清晰、文案简短，并补充基础测试。";
 const defaultContextPaths = ["src/Home.tsx", "src/styles.css", "src/Home.test.tsx", "package.json"].join("\n");
+const PREVIEW_URL = import.meta.env.VITE_DEMO_PREVIEW_URL ?? "http://127.0.0.1:5174";
+const PREVIEW_ORIGIN = new URL(PREVIEW_URL).origin;
 
 export default function App() {
+  const previewFrameRef = useRef<HTMLIFrameElement | null>(null);
+  const previewSelectModeRef = useRef(false);
+  const previewContentVersionRef = useRef("");
+  const isRefiningRef = useRef(false);
   const [requirement, setRequirement] = useState(defaultRequirement);
   const [contextPaths, setContextPaths] = useState(defaultContextPaths);
+  const [requirementFiles, setRequirementFiles] = useState<File[]>([]);
   const [pipeline, setPipeline] = useState<PipelineRun | null>(null);
   const [pipelines, setPipelines] = useState<PipelineRun[]>([]);
   const [selectedStageId, setSelectedStageId] = useState<string | null>(null);
   const [followCurrentStage, setFollowCurrentStage] = useState(true);
   const [rejectReason, setRejectReason] = useState("方案还需要补充风险控制和回滚策略。");
+  const [selectedPreviewElement, setSelectedPreviewElement] = useState<SelectedPreviewElement | null>(null);
+  const [previewSelectMode, setPreviewSelectMode] = useState(false);
+  const [previewRefreshKey, setPreviewRefreshKey] = useState(0);
+  const [refineInstruction, setRefineInstruction] = useState("把这个区域做得更紧凑，标题更醒目，但不要改变整体配色。");
+  const [isRefining, setIsRefining] = useState(false);
   const [nowTick, setNowTick] = useState(() => Date.now());
   const [isBusy, setIsBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
@@ -33,6 +52,33 @@ export default function App() {
     const timer = window.setInterval(() => setNowTick(Date.now()), 200);
     return () => window.clearInterval(timer);
   }, []);
+
+  useEffect(() => {
+    previewSelectModeRef.current = previewSelectMode;
+  }, [previewSelectMode]);
+
+  useEffect(() => {
+    const handleMessage = (event: MessageEvent) => {
+      if (isPreviewReadyMessage(event.data)) {
+        postPreviewSelectMode(previewSelectModeRef.current);
+        return;
+      }
+
+      if (!isPreviewSelectedMessage(event.data)) {
+        return;
+      }
+
+      setSelectedPreviewElement(event.data.element);
+      setPreviewSelectMode(false);
+    };
+
+    window.addEventListener("message", handleMessage);
+    return () => window.removeEventListener("message", handleMessage);
+  }, []);
+
+  useEffect(() => {
+    postPreviewSelectMode(previewSelectMode);
+  }, [previewSelectMode, previewRefreshKey]);
 
   useEffect(() => {
     if (!pipeline?.id || ["completed", "failed", "cancelled", "waiting_for_human"].includes(pipeline.status)) {
@@ -74,6 +120,28 @@ export default function App() {
     };
   }, [followCurrentStage, pipeline?.id, pipeline?.status]);
 
+  const codeGenerationCompletedAt =
+    pipeline?.stages.find((stage) => stage.id === "code-generation")?.completedAt ?? "";
+  const latestPreviewRefinedEventId =
+    [...(pipeline?.events ?? [])].reverse().find((event) => event.type === "preview_refined")?.id ?? "";
+
+  useEffect(() => {
+    if (!pipeline?.id) {
+      return;
+    }
+
+    const nextVersion = `${pipeline.id}:${codeGenerationCompletedAt}:${latestPreviewRefinedEventId}`;
+    if (
+      nextVersion === previewContentVersionRef.current ||
+      (!codeGenerationCompletedAt && !latestPreviewRefinedEventId)
+    ) {
+      return;
+    }
+
+    previewContentVersionRef.current = nextVersion;
+    setPreviewRefreshKey((value) => value + 1);
+  }, [codeGenerationCompletedAt, latestPreviewRefinedEventId, pipeline?.id]);
+
   async function refreshList() {
     setPipelines(await listPipelines());
   }
@@ -85,7 +153,7 @@ export default function App() {
         requirement,
         targetRepoPath: "workspace/demo",
         contextPaths: parseContextPaths(contextPaths)
-      });
+      }, requirementFiles);
       const started = await startPipeline(created.id);
       setPipeline(started);
       setSelectedStageId(started.currentStageId ?? started.stages[0]?.id ?? null);
@@ -129,6 +197,31 @@ export default function App() {
     });
   }
 
+  async function handleRefinePreview() {
+    if (!pipeline || !selectedPreviewElement || isRefiningRef.current) {
+      return;
+    }
+
+    isRefiningRef.current = true;
+    setIsRefining(true);
+    setError(null);
+    try {
+      const updated = await refinePipeline(pipeline.id, {
+        stageId: selectedStage?.id,
+        instruction: refineInstruction,
+        selectedElement: selectedPreviewElement
+      });
+      setPipeline(updated);
+      setPreviewRefreshKey((value) => value + 1);
+      await refreshList();
+    } catch (innerError) {
+      setError(innerError instanceof Error ? innerError.message : "预览修改失败");
+    } finally {
+      isRefiningRef.current = false;
+      setIsRefining(false);
+    }
+  }
+
   async function runAction(action: () => Promise<void>) {
     setIsBusy(true);
     setError(null);
@@ -139,6 +232,16 @@ export default function App() {
     } finally {
       setIsBusy(false);
     }
+  }
+
+  function postPreviewSelectMode(enabled: boolean) {
+    previewFrameRef.current?.contentWindow?.postMessage(
+      {
+        type: "devflow:set-select-mode",
+        enabled
+      },
+      PREVIEW_ORIGIN
+    );
   }
 
   const currentCheckpoint = pipeline?.stages.find((stage) => stage.status === "waiting_for_human");
@@ -180,6 +283,27 @@ export default function App() {
               value={contextPaths}
               onChange={(event) => setContextPaths(event.target.value)}
             />
+          </div>
+          <div className="fieldGroup">
+            <label htmlFor="requirementFiles">需求附件</label>
+            <input
+              id="requirementFiles"
+              type="file"
+              multiple
+              accept=".pdf,.txt,.md,.json,.csv,.yaml,.yml,.xml,.html,.css,.ts,.tsx,.js,.jsx,text/*,application/pdf,application/json"
+              onChange={(event) => setRequirementFiles(Array.from(event.target.files ?? []))}
+            />
+            {requirementFiles.length ? (
+              <div className="attachmentList">
+                {requirementFiles.map((file) => (
+                  <span className="attachmentChip" key={`${file.name}-${file.size}`}>
+                    {file.name} · {formatBytes(file.size)}
+                  </span>
+                ))}
+              </div>
+            ) : (
+              <p className="fieldHint">支持 PDF 和常见文本文件，最多 5 个，每个不超过 5MB。</p>
+            )}
           </div>
           <button type="button" onClick={handleCreateAndStart} disabled={isBusy || requirement.length < 8}>
             创建并启动 Pipeline
@@ -265,6 +389,12 @@ export default function App() {
                       <dd>{selectedStage.agentRole ?? "人工检查点"}</dd>
                     </div>
                     <div>
+                      <dt>启用 Skill</dt>
+                      <dd>
+                        <SkillChips skills={selectedStage.skills} />
+                      </dd>
+                    </div>
+                    <div>
                       <dt>依赖</dt>
                       <dd>{selectedStage.dependsOn?.join(", ") ?? "无"}</dd>
                     </div>
@@ -280,6 +410,44 @@ export default function App() {
 
                   {selectedStage.status === "running" ? (
                     <p className="liveHint">当前阶段正在调用 Agent。完成后这里会显示模型返回的阶段产物。</p>
+                  ) : null}
+
+                  {pipeline.requirementAttachments?.length ? (
+                    <div className="attachmentPreview">
+                      <h4>需求附件</h4>
+                      <div className="attachmentList">
+                        {pipeline.requirementAttachments.map((attachment) => (
+                          <article className="attachmentItem" key={attachment.id}>
+                            <strong>{attachment.fileName}</strong>
+                            <span>
+                              {attachment.mimeType} · {formatBytes(attachment.sizeBytes)}
+                              {attachment.truncated ? " · 已截断" : ""}
+                            </span>
+                            <p>{attachment.skippedReason ?? attachment.summary}</p>
+                          </article>
+                        ))}
+                      </div>
+                    </div>
+                  ) : null}
+
+                  {selectedStage.subTasks?.length ? (
+                    <div className="subTaskPanel">
+                      <h4>并行子任务</h4>
+                      <div className="subTaskList">
+                        {selectedStage.subTasks.map((subTask) => (
+                          <article className={`subTaskItem ${subTask.status}`} key={subTask.id}>
+                            <div>
+                              <span>{subTask.agentRole}</span>
+                              <h5>{subTask.title}</h5>
+                              <p>{subTask.scope.join(", ")}</p>
+                              <SkillChips skills={subTask.skills} />
+                            </div>
+                            <strong>{subTask.status}</strong>
+                            {subTask.artifact ? <small>{subTask.artifact.summary}</small> : null}
+                          </article>
+                        ))}
+                      </div>
+                    </div>
                   ) : null}
 
                   {selectedStage.stream?.content && (!selectedStage.artifact || !selectedStage.stream.isComplete) ? (
@@ -349,10 +517,77 @@ export default function App() {
         </section>
       ) : null}
 
+      {pipeline ? (
+        <section className="panel previewPanel">
+          <div className="sectionTitle">
+            <span>05</span>
+            <h2>预览校验</h2>
+          </div>
+          <div className="previewGrid">
+            <div className={previewSelectMode ? "previewFrameWrap selecting" : "previewFrameWrap"}>
+              <iframe
+                key={previewRefreshKey}
+                ref={previewFrameRef}
+                className="previewFrame"
+                title="Demo preview"
+                src={`${PREVIEW_URL}?devflowRefresh=${previewRefreshKey}`}
+                onLoad={() => {
+                  postPreviewSelectMode(previewSelectModeRef.current);
+                }}
+              />
+            </div>
+
+            <aside className="refinePanel">
+              <div className="previewActions">
+                <button
+                  type="button"
+                  className={previewSelectMode ? "selectModeButton active" : "selectModeButton"}
+                  onClick={() => setPreviewSelectMode((value) => !value)}
+                >
+                  {previewSelectMode ? "停止选择" : "选择元素"}
+                </button>
+                <button className="secondary" type="button" onClick={() => setPreviewRefreshKey((value) => value + 1)}>
+                  刷新预览
+                </button>
+              </div>
+
+              <div className="selectedElementCard">
+                <span>选中元素</span>
+                <strong>{selectedPreviewElement?.devflowId ?? "未选择"}</strong>
+                {selectedPreviewElement ? (
+                  <>
+                    <small>{selectedPreviewElement.file ?? "src/Home.tsx"}</small>
+                    <p>{selectedPreviewElement.text || selectedPreviewElement.tagName}</p>
+                  </>
+                ) : null}
+              </div>
+
+              <div className="fieldGroup">
+                <label htmlFor="refineInstruction">反馈要求</label>
+                <textarea
+                  id="refineInstruction"
+                  className="refineTextarea"
+                  value={refineInstruction}
+                  onChange={(event) => setRefineInstruction(event.target.value)}
+                />
+              </div>
+
+              <button
+                type="button"
+                onClick={() => void handleRefinePreview()}
+                disabled={!pipeline || !selectedPreviewElement || refineInstruction.trim().length < 2 || isRefining}
+              >
+                {isRefining ? "修改中..." : "让 Agent 修改"}
+              </button>
+            </aside>
+          </div>
+        </section>
+      ) : null}
+
       {currentCheckpoint && pipeline ? (
         <section className="panel checkpoint">
           <div className="sectionTitle">
-            <span>05</span>
+            <span>06</span>
             <h2>Human-in-the-Loop 检查点</h2>
           </div>
           <p>
@@ -370,6 +605,35 @@ export default function App() {
         </section>
       ) : null}
     </main>
+  );
+}
+
+const skillLabels: Record<AgentSkill, string> = {
+  requirement_structuring: "需求结构化",
+  code_context_reading: "上下文读取",
+  solution_decomposition: "方案拆解",
+  parallel_task_planning: "并行规划",
+  diff_planning: "Diff 规划",
+  workspace_editing: "工作区写入",
+  test_strategy: "测试策略",
+  risk_review: "风险评审",
+  preview_refinement: "预览微调",
+  delivery_summary: "交付摘要"
+};
+
+function SkillChips({ skills }: { skills?: AgentSkill[] }) {
+  if (!skills?.length) {
+    return <span className="muted">未配置</span>;
+  }
+
+  return (
+    <div className="skillChips">
+      {skills.map((skill) => (
+        <span className="skillChip" key={skill}>
+          {skillLabels[skill]}
+        </span>
+      ))}
+    </div>
   );
 }
 
@@ -397,6 +661,18 @@ function formatTime(value?: string): string {
     minute: "2-digit",
     second: "2-digit"
   }).format(new Date(value));
+}
+
+function formatBytes(value: number): string {
+  if (value < 1024) {
+    return `${value}B`;
+  }
+
+  if (value < 1024 * 1024) {
+    return `${(value / 1024).toFixed(1)}KB`;
+  }
+
+  return `${(value / 1024 / 1024).toFixed(1)}MB`;
 }
 
 function formatDuration(
@@ -436,4 +712,31 @@ function parseContextPaths(value: string): string[] {
     .split(/\r?\n|,/)
     .map((item) => item.trim())
     .filter(Boolean);
+}
+
+function isPreviewSelectedMessage(value: unknown): value is {
+  type: "devflow:element-selected";
+  element: SelectedPreviewElement;
+} {
+  if (!value || typeof value !== "object") {
+    return false;
+  }
+
+  const message = value as { type?: unknown; element?: Partial<SelectedPreviewElement> };
+  return (
+    message.type === "devflow:element-selected" &&
+    typeof message.element?.devflowId === "string" &&
+    typeof message.element.tagName === "string" &&
+    typeof message.element.text === "string"
+  );
+}
+
+function isPreviewReadyMessage(value: unknown): value is {
+  type: "devflow:preview-ready";
+} {
+  if (!value || typeof value !== "object") {
+    return false;
+  }
+
+  return (value as { type?: unknown }).type === "devflow:preview-ready";
 }

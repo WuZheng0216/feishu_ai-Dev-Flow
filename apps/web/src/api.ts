@@ -1,4 +1,9 @@
-import type { CreatePipelineRequest, PipelineRun, RejectCheckpointRequest } from "@devflow/shared";
+import type {
+  CreatePipelineRequest,
+  PipelineRun,
+  RefinePipelineRequest,
+  RejectCheckpointRequest
+} from "@devflow/shared";
 
 const API_BASE_URL = import.meta.env.VITE_API_BASE_URL ?? "http://localhost:4000";
 
@@ -6,7 +11,33 @@ export async function listPipelines(): Promise<PipelineRun[]> {
   return request("/api/pipelines");
 }
 
-export async function createPipeline(input: CreatePipelineRequest): Promise<PipelineRun> {
+export async function createPipeline(input: CreatePipelineRequest, attachments: File[] = []): Promise<PipelineRun> {
+  if (attachments.length > 0) {
+    const formData = new FormData();
+    formData.set("requirement", input.requirement);
+
+    if (input.name) {
+      formData.set("name", input.name);
+    }
+
+    if (input.targetRepoPath) {
+      formData.set("targetRepoPath", input.targetRepoPath);
+    }
+
+    if (input.contextPaths?.length) {
+      formData.set("contextPaths", JSON.stringify(input.contextPaths));
+    }
+
+    for (const file of attachments) {
+      formData.append("attachments", file);
+    }
+
+    return request("/api/pipelines", {
+      method: "POST",
+      body: formData
+    });
+  }
+
   return request("/api/pipelines", {
     method: "POST",
     body: JSON.stringify(input)
@@ -40,10 +71,17 @@ export async function rejectCheckpoint(
   });
 }
 
+export async function refinePipeline(id: string, input: RefinePipelineRequest): Promise<PipelineRun> {
+  return request(`/api/pipelines/${id}/refine`, {
+    method: "POST",
+    body: JSON.stringify(input)
+  });
+}
+
 async function request<T>(path: string, init?: RequestInit): Promise<T> {
   const headers = new Headers(init?.headers);
 
-  if (init?.body && !headers.has("Content-Type")) {
+  if (init?.body && !(init.body instanceof FormData) && !headers.has("Content-Type")) {
     headers.set("Content-Type", "application/json");
   }
 

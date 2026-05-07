@@ -1,4 +1,14 @@
-import type { HumanDecision, PipelineEvent, PipelineRun, PipelineStage, StageArtifact } from "@devflow/shared";
+import type {
+  AgentSkill,
+  HumanDecision,
+  CodeContextSnapshot,
+  PipelineEvent,
+  PipelineRun,
+  PipelineStage,
+  RefinePipelineRequest,
+  StageArtifact,
+  StageSubTask
+} from "@devflow/shared";
 import { getAgentPromptProfile } from "../agents/agentPrompts.js";
 import type { AgentProvider } from "../agents/agentProvider.js";
 import type { DevFlowNotifier } from "../integrations/notifier.js";
@@ -64,6 +74,34 @@ export class PipelineRunner {
           type: "pipeline_cancelled",
           message: "Pipeline 已取消。",
           createdAt: now
+        }
+      )
+    );
+  }
+
+  async refine(pipelineId: string, input: RefinePipelineRequest): Promise<PipelineRun> {
+    const pipeline = this.requirePipeline(pipelineId);
+
+    if (pipeline.status === "cancelled" || pipeline.status === "failed") {
+      throw new PipelineStateError(`Pipeline ${pipelineId} cannot be refined while ${pipeline.status}.`);
+    }
+
+    const result = await this.workspaceChangeService.applyRefinement(pipeline, input);
+    const now = new Date().toISOString();
+
+    return this.store.save(
+      appendEvent(
+        pipeline,
+        {
+          type: "preview_refined",
+          message: `已根据预览反馈调整：${input.selectedElement.devflowId}。`,
+          createdAt: now,
+          stageId: input.stageId ?? pipeline.currentStageId,
+          details: {
+            devflowId: input.selectedElement.devflowId,
+            instruction: compactDetail(input.instruction),
+            changedFiles: result?.changedFiles.length ?? 0
+          }
         }
       )
     );
@@ -295,6 +333,7 @@ export class PipelineRunner {
           details: {
             kind: stage.kind,
             agentRole: stage.agentRole ?? null,
+            skills: formatSkillIds(stage.skills),
             promptProfile: stage.agentRole ? getAgentPromptProfile(stage.agentRole).title : null,
             provider: this.agentProvider.name
           }
@@ -334,15 +373,22 @@ export class PipelineRunner {
         running = this.updateStageStream(running.id, stage.id, content, isComplete);
       };
 
-      let artifact = await this.agentProvider.execute(
-        { pipeline: running, stage, previousArtifacts, codeContext },
-        {
-          onStream: ({ content }) => saveStream(content)
-        }
-      );
+      const subTaskPlan = createParallelSubTaskPlan(stage);
+      let artifact = subTaskPlan.length
+        ? await this.executeParallelSubTasks(running, stage, subTaskPlan, previousArtifacts, codeContext)
+        : await this.agentProvider.execute(
+            { pipeline: running, stage, previousArtifacts, codeContext },
+            {
+              onStream: ({ content }) => saveStream(content)
+            }
+          );
+
+      if (subTaskPlan.length) {
+        saveStream(artifact.markdown, true);
+      }
 
       if (stage.id === "code-generation") {
-        const workspaceChange = await this.workspaceChangeService.applyCodeGeneration(running);
+        const workspaceChange = await this.workspaceChangeService.applyCodeGeneration(running, artifact);
         if (workspaceChange) {
           artifact = appendWorkspaceChangeArtifact(artifact, workspaceChange);
           saveStream(artifact.markdown, true);
@@ -438,6 +484,143 @@ export class PipelineRunner {
     });
   }
 
+  private async executeParallelSubTasks(
+    pipeline: PipelineRun,
+    stage: PipelineStage,
+    subTaskPlan: StageSubTask[],
+    previousArtifacts: StageArtifact[],
+    codeContext?: CodeContextSnapshot
+  ): Promise<StageArtifact> {
+    const startedAt = new Date().toISOString();
+    const runningSubTasks = subTaskPlan.map((subTask) => ({
+      ...subTask,
+      status: "running" as const,
+      startedAt
+    }));
+    let nextPipeline = {
+      ...pipeline,
+      stages: updateStage(pipeline.stages, stage.id, {
+        subTasks: runningSubTasks
+      })
+    };
+
+    for (const subTask of runningSubTasks) {
+      nextPipeline = appendEvent(nextPipeline, {
+        type: "subtask_started",
+        message: `并行子任务开始：${subTask.title}。`,
+        createdAt: startedAt,
+        stageId: stage.id,
+        details: {
+          subTaskId: subTask.id,
+          agentRole: subTask.agentRole,
+          skills: formatSkillIds(subTask.skills),
+          scope: subTask.scope.join(", ")
+        }
+      });
+    }
+
+    this.store.save(nextPipeline);
+
+    const completedSubTasks = await Promise.all(
+      runningSubTasks.map(async (subTask) => {
+        const syntheticStage: PipelineStage = {
+          ...stage,
+          id: `${stage.id}/${subTask.id}`,
+          name: subTask.title,
+          kind: "agent",
+          status: "running",
+          agentRole: subTask.agentRole,
+          skills: subTask.skills,
+          dependsOn: [],
+          artifact: undefined,
+          stream: undefined,
+          subTasks: undefined
+        };
+
+        try {
+          const artifact = await this.agentProvider.execute({
+            pipeline: this.requirePipeline(pipeline.id),
+            stage: syntheticStage,
+            previousArtifacts,
+            codeContext
+          });
+          const completedAt = new Date().toISOString();
+          const completed: StageSubTask = {
+            ...subTask,
+            status: "completed",
+            completedAt,
+            artifact
+          };
+
+          this.updateSubTask(pipeline.id, stage.id, subTask.id, completed, {
+            type: "subtask_completed",
+            message: `并行子任务完成：${subTask.title}。`,
+            createdAt: completedAt,
+            stageId: stage.id,
+            details: {
+              subTaskId: subTask.id,
+              artifactTitle: artifact.title,
+              skills: formatSkillIds(subTask.skills),
+              durationMs: Date.parse(completedAt) - Date.parse(startedAt)
+            }
+          });
+
+          return completed;
+        } catch (error) {
+          const completedAt = new Date().toISOString();
+          const message = error instanceof Error ? error.message : "Unknown error";
+          const failed: StageSubTask = {
+            ...subTask,
+            status: "failed",
+            completedAt,
+            error: message
+          };
+
+          this.updateSubTask(pipeline.id, stage.id, subTask.id, failed, {
+            type: "subtask_failed",
+            message: `并行子任务失败：${subTask.title}。${message}`,
+            createdAt: completedAt,
+            stageId: stage.id,
+            details: {
+              subTaskId: subTask.id,
+              skills: formatSkillIds(subTask.skills)
+            }
+          });
+
+          throw error;
+        }
+      })
+    );
+
+    return buildParallelSubTaskArtifact(stage, completedSubTasks);
+  }
+
+  private updateSubTask(
+    pipelineId: string,
+    stageId: string,
+    subTaskId: string,
+    patch: Partial<StageSubTask>,
+    event?: PipelineEventInput
+  ): PipelineRun {
+    const pipeline = this.requirePipeline(pipelineId);
+    const stages = pipeline.stages.map((stage) =>
+      stage.id === stageId
+        ? {
+            ...stage,
+            subTasks: (stage.subTasks ?? []).map((subTask) =>
+              subTask.id === subTaskId ? { ...subTask, ...patch } : subTask
+            )
+          }
+        : stage
+    );
+    const updated = {
+      ...pipeline,
+      stages
+    };
+
+    return this.store.save(event ? appendEvent(updated, event) : updated);
+  }
+
   private requirePipeline(pipelineId: string): PipelineRun {
     const pipeline = this.store.get(pipelineId);
 
@@ -528,9 +711,121 @@ function resetStageForRetry(stage: PipelineStage, incrementRetry: boolean): Pipe
     stream: undefined,
     humanDecision: undefined,
     codeContext: undefined,
+    subTasks: undefined,
     startedAt: undefined,
     completedAt: undefined,
     retryCount: incrementRetry ? stage.retryCount + 1 : stage.retryCount
+  };
+}
+
+function createParallelSubTaskPlan(stage: PipelineStage): StageSubTask[] {
+  const startedPlan: Omit<StageSubTask, "status">[] =
+    stage.id === "solution-design"
+      ? [
+          {
+            id: "architecture-plan",
+            title: "架构与影响范围分析",
+            agentRole: "solution_architect",
+            skills: ["code_context_reading", "solution_decomposition", "parallel_task_planning"],
+            scope: ["src/Home.tsx", "src/styles.css", "package.json"],
+            parallelGroup: "solution-design"
+          },
+          {
+            id: "risk-and-review-plan",
+            title: "风险、回滚与评审关注点",
+            agentRole: "reviewer",
+            skills: ["code_context_reading", "risk_review"],
+            scope: ["src/Home.tsx", "src/Home.test.tsx"],
+            parallelGroup: "solution-design"
+          },
+          {
+            id: "test-strategy-plan",
+            title: "测试策略与验收路径",
+            agentRole: "test_engineer",
+            skills: ["code_context_reading", "test_strategy"],
+            scope: ["src/Home.test.tsx", "package.json"],
+            parallelGroup: "solution-design"
+          }
+        ]
+      : stage.id === "code-generation"
+        ? [
+            {
+              id: "data-model",
+              title: "数据模型与内容实现",
+              agentRole: "coder",
+              skills: ["code_context_reading", "diff_planning", "workspace_editing"],
+              scope: ["src/types.ts", "src/data/*.ts", "src/constants.ts"],
+              parallelGroup: "code-generation"
+            },
+            {
+              id: "ui-structure",
+              title: "组件结构实现",
+              agentRole: "coder",
+              skills: ["code_context_reading", "diff_planning", "workspace_editing"],
+              scope: ["src/Home.tsx"],
+              parallelGroup: "code-generation"
+            },
+            {
+              id: "visual-style",
+              title: "视觉样式实现",
+              agentRole: "coder",
+              skills: ["code_context_reading", "diff_planning", "workspace_editing", "preview_refinement"],
+              scope: ["src/styles.css"],
+              parallelGroup: "code-generation"
+            },
+            {
+              id: "test-coverage",
+              title: "测试用例补充",
+              agentRole: "test_engineer",
+              skills: ["code_context_reading", "test_strategy"],
+              scope: ["src/Home.test.tsx"],
+              parallelGroup: "code-generation"
+            }
+          ]
+        : [];
+
+  return startedPlan.map((subTask) => ({
+    ...subTask,
+    status: "pending"
+  }));
+}
+
+function buildParallelSubTaskArtifact(stage: PipelineStage, subTasks: StageSubTask[]): StageArtifact {
+  const createdAt = new Date().toISOString();
+  const completed = subTasks.filter((subTask) => subTask.status === "completed");
+  const summary = `已并行完成 ${completed.length}/${subTasks.length} 个子任务。`;
+  const taskSections = subTasks.map((subTask) =>
+    [
+      `### ${subTask.title}`,
+      "",
+      `- 子任务 ID：${subTask.id}`,
+      `- Agent：${subTask.agentRole}`,
+      `- Skills：${formatSkillIds(subTask.skills) || "未配置"}`,
+      `- Scope：${subTask.scope.join(", ")}`,
+      `- 状态：${subTask.status}`,
+      subTask.startedAt && subTask.completedAt
+        ? `- 耗时：${Date.parse(subTask.completedAt) - Date.parse(subTask.startedAt)}ms`
+        : "",
+      "",
+      subTask.artifact?.markdown ?? subTask.error ?? "无产物。"
+    ]
+      .filter(Boolean)
+      .join("\n")
+  );
+
+  return {
+    title: `${stage.name}并行子任务汇总`,
+    summary,
+    markdown: [
+      `## ${stage.name}并行子任务汇总`,
+      "",
+      summary,
+      "",
+      "本阶段将复杂任务拆成多个互不重叠 scope 的子任务，并通过 `Promise.all` 并发调用对应 Agent。文件写入在所有子任务完成后统一执行，避免并发写冲突。",
+      "",
+      ...taskSections
+    ].join("\n"),
+    createdAt
   };
 }
 
@@ -563,4 +858,13 @@ function appendWorkspaceChangeArtifact(
       diffSection
     ].join("\n")
   };
+}
+
+function compactDetail(value: string): string {
+  const normalized = value.replace(/\s+/g, " ").trim();
+  return normalized.length > 120 ? `${normalized.slice(0, 120)}...` : normalized;
+}
+
+function formatSkillIds(skills?: AgentSkill[]): string {
+  return skills?.join(", ") ?? "";
 }

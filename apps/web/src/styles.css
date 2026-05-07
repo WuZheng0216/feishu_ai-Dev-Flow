@@ -35,6 +35,7 @@ body {
 }
 
 button,
+input,
 textarea {
   font: inherit;
 }
@@ -83,6 +84,15 @@ textarea:focus {
   border-color: rgba(25, 118, 99, 0.45);
   background: #fff;
   box-shadow: 0 0 0 3px rgba(25, 118, 99, 0.12);
+}
+
+input[type="file"] {
+  width: 100%;
+  border: 1px dashed rgba(25, 118, 99, 0.28);
+  border-radius: 8px;
+  padding: 0.8rem;
+  color: var(--muted);
+  background: rgba(255, 255, 255, 0.72);
 }
 
 .shell {
@@ -204,8 +214,32 @@ textarea:focus {
   font-weight: 800;
 }
 
+.fieldHint {
+  margin: 0;
+  color: var(--subtle);
+  font-size: 0.78rem;
+}
+
 .compactTextarea {
   min-height: 98px;
+}
+
+.attachmentList {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+}
+
+.attachmentChip {
+  max-width: 100%;
+  border: 1px solid rgba(25, 118, 99, 0.16);
+  border-radius: 999px;
+  padding: 0.28rem 0.58rem;
+  color: var(--accent);
+  background: var(--accent-soft);
+  font-size: 0.78rem;
+  font-weight: 800;
+  overflow-wrap: anywhere;
 }
 
 .runList {
@@ -232,6 +266,7 @@ textarea:focus {
 
 .timelinePanel,
 .checkpoint,
+.previewPanel,
 .observePanel {
   margin-top: 16px;
 }
@@ -365,6 +400,83 @@ textarea:focus {
   background: #fff;
 }
 
+.previewGrid {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) 320px;
+  gap: 14px;
+  align-items: start;
+}
+
+.previewFrameWrap {
+  position: relative;
+  overflow: hidden;
+  min-height: 520px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  background: #fff;
+}
+
+.previewFrameWrap.selecting {
+  border-color: rgba(25, 118, 99, 0.48);
+  box-shadow: 0 0 0 3px rgba(25, 118, 99, 0.12);
+}
+
+.previewFrame {
+  display: block;
+  width: 100%;
+  height: 560px;
+  border: 0;
+  background: #fff;
+}
+
+.refinePanel {
+  display: grid;
+  gap: 12px;
+}
+
+.previewActions {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+}
+
+.selectModeButton.active {
+  background: var(--accent);
+}
+
+.selectedElementCard {
+  display: grid;
+  gap: 4px;
+  border: 1px solid rgba(25, 118, 99, 0.16);
+  border-radius: 8px;
+  padding: 12px;
+  background: var(--accent-soft);
+}
+
+.selectedElementCard span,
+.selectedElementCard small {
+  color: var(--muted);
+  font-size: 0.78rem;
+}
+
+.selectedElementCard strong {
+  color: var(--accent);
+  overflow-wrap: anywhere;
+}
+
+.selectedElementCard p {
+  display: -webkit-box;
+  overflow: hidden;
+  margin: 4px 0 0;
+  color: var(--ink);
+  -webkit-box-orient: vertical;
+  -webkit-line-clamp: 4;
+}
+
+.refineTextarea {
+  min-height: 130px;
+}
+
 .observeGrid {
   display: grid;
   grid-template-columns: minmax(0, 1.28fr) minmax(280px, 0.72fr);
@@ -421,6 +533,34 @@ textarea:focus {
   background: var(--rose-soft);
 }
 
+.skillChips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 6px;
+}
+
+.skillChip {
+  display: inline-flex;
+  align-items: center;
+  max-width: 100%;
+  border: 1px solid rgba(107, 90, 166, 0.16);
+  border-radius: 999px;
+  padding: 0.16rem 0.48rem;
+  color: #4c4475;
+  background: var(--violet-soft);
+  font-size: 0.72rem;
+  font-weight: 800;
+  line-height: 1.45;
+  overflow-wrap: anywhere;
+}
+
+.subTaskItem .skillChip {
+  color: #4c4475;
+  font-size: 0.72rem;
+  letter-spacing: 0;
+  text-transform: none;
+}
+
 .stageDetail dl {
   display: grid;
   grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -454,6 +594,114 @@ textarea:focus {
   padding: 10px 12px;
   color: #315146;
   background: var(--accent-soft);
+}
+
+.attachmentPreview {
+  margin-top: 14px;
+  border: 1px solid rgba(25, 118, 99, 0.16);
+  border-radius: 8px;
+  padding: 12px;
+  background: rgba(255, 255, 255, 0.66);
+}
+
+.attachmentPreview h4 {
+  margin: 0 0 10px;
+}
+
+.attachmentItem {
+  display: grid;
+  gap: 4px;
+  min-width: min(100%, 240px);
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 10px;
+  background: rgba(255, 255, 255, 0.76);
+}
+
+.attachmentItem strong,
+.attachmentItem p {
+  margin: 0;
+  overflow-wrap: anywhere;
+}
+
+.attachmentItem span {
+  color: var(--muted);
+  font-size: 0.76rem;
+}
+
+.attachmentItem p {
+  color: var(--muted);
+  font-size: 0.82rem;
+}
+
+.subTaskPanel {
+  margin-top: 14px;
+}
+
+.subTaskPanel h4 {
+  margin: 0 0 10px;
+}
+
+.subTaskList {
+  display: grid;
+  grid-template-columns: repeat(3, minmax(0, 1fr));
+  gap: 10px;
+}
+
+.subTaskItem {
+  display: grid;
+  gap: 8px;
+  min-width: 0;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  padding: 12px;
+  background: rgba(255, 255, 255, 0.74);
+}
+
+.subTaskItem span {
+  color: var(--violet);
+  font-size: 0.7rem;
+  font-weight: 900;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.subTaskItem h5 {
+  margin: 0.2rem 0;
+  font-size: 0.95rem;
+}
+
+.subTaskItem p,
+.subTaskItem small {
+  margin: 0;
+  color: var(--muted);
+  overflow-wrap: anywhere;
+  font-size: 0.78rem;
+}
+
+.subTaskItem strong {
+  width: fit-content;
+  border-radius: 999px;
+  padding: 0.18rem 0.5rem;
+  color: var(--muted);
+  background: rgba(29, 37, 33, 0.07);
+  font-size: 0.74rem;
+}
+
+.subTaskItem.running {
+  border-color: rgba(25, 118, 99, 0.28);
+  background: var(--accent-soft);
+}
+
+.subTaskItem.running strong,
+.subTaskItem.completed strong {
+  color: var(--accent);
+  background: rgba(25, 118, 99, 0.12);
+}
+
+.subTaskItem.failed strong {
+  color: var(--rose);
+  background: var(--rose-soft);
 }
 
 .artifactPreview,
@@ -603,6 +851,8 @@ textarea:focus {
   }
 
   .observeGrid,
+  .previewGrid,
+  .subTaskList,
   .stageDetail dl {
     grid-template-columns: 1fr;
   }

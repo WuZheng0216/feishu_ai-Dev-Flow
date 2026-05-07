@@ -1,12 +1,17 @@
 import type {
   AgentRole,
+  AgentSkill,
   CodeContextSnapshot,
   PipelineRun,
   PipelineStage,
   StageArtifact
 } from "@devflow/shared";
 import type { ApiConfig } from "../config.js";
-import { getAgentPromptProfile } from "./agentPrompts.js";
+import {
+  getAgentPromptProfile,
+  getAgentSkillProfile,
+  getDefaultSkillsForRole
+} from "./agentPrompts.js";
 
 export interface AgentExecutionInput {
   pipeline: PipelineRun;
@@ -48,6 +53,7 @@ export class MockAgentProvider implements AgentProvider {
 
     const role = stage.agentRole ?? "delivery_manager";
     const title = getAgentPromptProfile(role).title;
+    const skills = resolveStageSkills(stage);
     const previous = previousArtifacts.map((item) => `- ${item.title}: ${item.summary}`).join("\n");
     const artifact = {
       title,
@@ -62,6 +68,12 @@ export class MockAgentProvider implements AgentProvider {
         "",
         "### 代码库上下文",
         formatCodeContextSummary(codeContext),
+        "",
+        "### 需求附件",
+        formatRequirementAttachmentsSummary(pipeline),
+        "",
+        "### 启用 Skill",
+        formatSkillProfileList(skills),
         "",
         "### Agent 产物",
         buildMarkdown(role, pipeline),
@@ -315,16 +327,73 @@ function buildAgentPrompt(
     "代码库上下文：",
     formatCodeContextForPrompt(codeContext),
     "",
+    "需求附件上下文：",
+    formatRequirementAttachmentsForPrompt(pipeline),
+    "",
+    "本阶段启用 Skill：",
+    formatSkillProfileList(resolveStageSkills(stage)),
+    "",
     "输出要求：",
-    "- 直接输出 Markdown，不要输出 JSON。",
-    "- 第一行使用一级标题。",
-    "- 正文包含可执行建议、风险、验证方式。",
-    "- 不要实际声称已经修改文件，除非输入上下文明确包含真实 diff 或执行结果。",
-    "- 如果代码库上下文不足，请明确列出缺失路径，不要臆测文件内容。",
+    ...getOutputRequirements(stage),
     "",
     "本角色必须覆盖：",
-    ...getStageChecklist(stage).map((item) => `- ${item}`)
+    ...getStageOutputChecklist(stage).map((item) => `- ${item}`)
   ].join("\n");
+}
+
+function getOutputRequirements(stage: PipelineStage): string[] {
+  if (!stage.id.startsWith("code-generation")) {
+    return [
+      "- 直接输出 Markdown，不要输出 JSON。",
+      "- 第一行使用一级标题。",
+      "- 正文包含可执行建议、风险、验证方式。",
+      "- 不要实际声称已经修改文件，除非输入上下文明确包含真实 diff 或执行结果。",
+      "- 如果代码库上下文不足，请明确列出缺失路径，不要臆测文件内容。"
+    ];
+  }
+
+  const scopeFiles = getCodeGenerationScopeFiles(stage);
+  return [
+    "- 只输出可写入文件块，不要输出代码变更计划、表格、风险说明、测试计划或额外解释。",
+    "- 每个文件块必须是完整文件内容，必须闭合代码围栏；不要输出半截文件。",
+    scopeFiles.length
+      ? `- 当前子任务只允许输出这些 scope 文件：${scopeFiles.map((file) => `\`${file}\``).join("、")}。`
+      : "- 只输出当前子任务 scope 需要的文件。",
+    "- 文件块格式：",
+    "  ### FILE: src/Home.tsx",
+    "  ```tsx",
+    "  // full file content",
+    "  ```",
+    "- 只输出当前阶段 scope 需要的文件；不要输出 `node_modules`、构建产物、绝对路径或目标仓库外路径。",
+    "- 代码必须基于现有技术栈和已读取上下文，可运行、可编译、可测试。",
+    "- 如果需求数据量很大，优先生成可运行 MVP：提取代表性数据和摘要说明，不要为了全量数据导致文件被截断。"
+  ];
+}
+
+function getCodeGenerationScopeFiles(stage: PipelineStage): string[] {
+  if (stage.id.endsWith("/data-model")) {
+    return ["src/types.ts", "src/data/*.ts", "src/constants.ts"];
+  }
+
+  if (stage.id.endsWith("/ui-structure")) {
+    return ["src/Home.tsx"];
+  }
+
+  if (stage.id.endsWith("/visual-style")) {
+    return ["src/styles.css"];
+  }
+
+  if (stage.id.endsWith("/test-coverage")) {
+    return ["src/Home.test.tsx"];
+  }
+
+  return [
+    "src/types.ts",
+    "src/data/*.ts",
+    "src/Home.tsx",
+    "src/styles.css",
+    "src/Home.test.tsx"
+  ];
 }
 
 function formatCodeContextSummary(codeContext?: CodeContextSnapshot): string {
@@ -379,26 +448,131 @@ function formatCodeContextForPrompt(codeContext?: CodeContextSnapshot): string {
   ].join("\n");
 }
 
+function formatRequirementAttachmentsSummary(pipeline: PipelineRun): string {
+  const attachments = pipeline.requirementAttachments ?? [];
+
+  if (attachments.length === 0) {
+    return "- 未上传需求附件。";
+  }
+
+  return attachments
+    .map((attachment) => {
+      const status = attachment.skippedReason ? `解析跳过：${attachment.skippedReason}` : attachment.summary;
+      return `- ${attachment.fileName} (${attachment.mimeType}, ${attachment.sizeBytes} bytes): ${status}`;
+    })
+    .join("\n");
+}
+
+function formatRequirementAttachmentsForPrompt(pipeline: PipelineRun): string {
+  const attachments = pipeline.requirementAttachments ?? [];
+
+  if (attachments.length === 0) {
+    return "未上传需求附件。";
+  }
+
+  return attachments
+    .map((attachment) =>
+      [
+        `--- BEGIN ATTACHMENT ${attachment.fileName} (${attachment.mimeType}, ${attachment.sizeBytes} bytes${attachment.truncated ? ", truncated" : ""}) ---`,
+        attachment.skippedReason ? `解析状态：${attachment.skippedReason}` : attachment.extractedText,
+        `--- END ATTACHMENT ${attachment.fileName} ---`
+      ].join("\n")
+    )
+    .join("\n\n");
+}
+
 function buildSystemPrompt(stage: PipelineStage): string {
   const role = stage.agentRole ?? "delivery_manager";
   const profile = getAgentPromptProfile(role);
+  const skills = resolveStageSkills(stage);
 
   return [
     profile.systemPrompt,
     "",
+    "启用 Skill：",
+    formatSkillProfileList(skills),
+    "",
     "通用约束：",
     "- 使用中文输出。",
-    "- 直接输出 Markdown，不要输出 JSON。",
-    "- 不要输出 Markdown 代码围栏。",
-    "- 第一行使用一级标题。",
+    stage.id.startsWith("code-generation")
+      ? "- 只输出 FILE 文件块，不要输出代码变更计划、表格或解释性段落。"
+      : "- 直接输出 Markdown，不要输出 JSON。",
+    stage.id.startsWith("code-generation")
+      ? "- 代码生成阶段允许且必须输出 FILE 文件块中的 Markdown 代码围栏。"
+      : "- 不要输出 Markdown 代码围栏。",
+    stage.id.startsWith("code-generation")
+      ? "- 第一行必须是 `### FILE: path`。"
+      : "- 第一行使用一级标题。",
     "- 明确区分事实、推断、假设和待确认事项。",
+    "- 只按启用 Skill 所描述的职责组织输出，不要声称调用了未提供的外部工具。",
     "- 如果没有真实文件 diff、命令输出或执行日志，不要声称已经完成代码修改或测试通过。"
   ].join("\n");
+}
+
+function resolveStageSkills(stage: PipelineStage): AgentSkill[] {
+  const role = stage.agentRole ?? "delivery_manager";
+  return stage.skills?.length ? stage.skills : getDefaultSkillsForRole(role);
+}
+
+function formatSkillProfileList(skills: AgentSkill[]): string {
+  if (skills.length === 0) {
+    return "- 未配置专用 Skill。";
+  }
+
+  return skills
+    .map((skill) => {
+      const profile = getAgentSkillProfile(skill);
+      return `- ${profile.name} (\`${profile.id}\`): ${profile.description}`;
+    })
+    .join("\n");
 }
 
 function getStageChecklist(stage: PipelineStage): string[] {
   const role = stage.agentRole ?? "delivery_manager";
   return getAgentPromptProfile(role).outputChecklist;
+}
+
+function getStageOutputChecklist(stage: PipelineStage): string[] {
+  if (!stage.id.startsWith("code-generation")) {
+    return getStageChecklist(stage);
+  }
+
+  if (stage.id.endsWith("/data-model")) {
+    return [
+      "输出 `src/types.ts` 和必要的 `src/data/*.ts` 完整文件内容。",
+      "结构化数据必须能被 `src/Home.tsx` 直接导入使用，字段名与类型一致。",
+      "如果原始数据很长，可以输出代表性数据和明确的数据位，不要让文件块截断。"
+    ];
+  }
+
+  if (stage.id.endsWith("/ui-structure")) {
+    return [
+      "输出 `src/Home.tsx` 的完整文件内容。",
+      "组件必须导入并调用 `useDevflowPreviewBridge()`。",
+      "主要可交互/可评审区域必须带 `data-devflow-id` 和 `data-devflow-file`。"
+    ];
+  }
+
+  if (stage.id.endsWith("/visual-style")) {
+    return [
+      "输出 `src/styles.css` 的完整文件内容。",
+      "样式必须适配桌面和移动端。",
+      "必须包含 `.devflowSelectMode` 与 `.devflowSelectableHover`，保证预览选中交互可见。"
+    ];
+  }
+
+  if (stage.id.endsWith("/test-coverage")) {
+    return [
+      "输出 `src/Home.test.tsx` 的完整文件内容。",
+      "测试必须验证页面核心标题、关键内容和至少一个交互/状态文本。",
+      "不要输出测试计划，只输出测试文件。"
+    ];
+  }
+
+  return [
+    "输出目标仓库可直接写入的完整文件内容。",
+    "不要输出计划、表格或解释。"
+  ];
 }
 
 function parseArtifact(content: string, fallbackTitle: string): StageArtifact {
@@ -470,6 +644,18 @@ function buildSummary(role: AgentRole, requirement: string): string {
   return summaries[role];
 }
 
+function compactRequirement(requirement: string): string {
+  const normalized = requirement.replace(/\s+/g, " ").trim();
+  return normalized.length > 80 ? `${normalized.slice(0, 80)}...` : normalized;
+}
+
+function escapeHtml(value: string): string {
+  return value
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;");
+}
+
 function buildMarkdown(role: AgentRole, pipeline: PipelineRun): string {
   switch (role) {
     case "requirements_analyst":
@@ -486,9 +672,38 @@ function buildMarkdown(role: AgentRole, pipeline: PipelineRun): string {
       ].join("\n");
     case "coder":
       return [
-        "- 计划修改：根据方案生成组件、API DTO、状态更新逻辑。",
-        "- Diff 摘要：新增功能入口，补充阶段产物展示和交付摘要。",
-        `- 目标仓库：${pipeline.targetRepoPath || "workspace/demo"}。`
+        "- 计划修改：根据需求生成目标页面、样式和基础测试。",
+        "- Diff 摘要：以下 FILE 块可由 workspace 写入器直接落地。",
+        `- 目标仓库：${pipeline.targetRepoPath || "workspace/demo"}。`,
+        "",
+        "### FILE: src/Home.tsx",
+        "```tsx",
+        'import React from "react";',
+        "",
+        "export function Home() {",
+        "  return (",
+        '    <main className="generatedPage">',
+        '      <p className="eyebrow">AI Generated Page</p>',
+        `      <h1>${escapeHtml(compactRequirement(pipeline.requirement))}</h1>`,
+        "      <p>这是 Mock Agent 根据需求生成的通用页面。切换到真实 LLM 后会生成更完整的业务页面。</p>",
+        "    </main>",
+        "  );",
+        "}",
+        "```",
+        "",
+        "### FILE: src/styles.css",
+        "```css",
+        ".generatedPage {",
+        "  width: min(960px, calc(100% - 32px));",
+        "  margin: 0 auto;",
+        "  padding: 64px 0;",
+        '  font-family: "Segoe UI", sans-serif;',
+        "}",
+        ".eyebrow {",
+        "  color: #197663;",
+        "  font-weight: 800;",
+        "}",
+        "```"
       ].join("\n");
     case "test_engineer":
       return [

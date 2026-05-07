@@ -1,8 +1,12 @@
-import type { FastifyInstance } from "fastify";
+import type { FastifyInstance, FastifyRequest } from "fastify";
 import { z } from "zod";
-import type { PipelineRun } from "@devflow/shared";
+import type { PipelineRun, RequirementAttachment } from "@devflow/shared";
 import { createDefaultStages } from "../domain/defaultPipeline.js";
 import type { PipelineRunner } from "../domain/pipelineRunner.js";
+import {
+  parseRequirementAttachments,
+  type UploadedRequirementAttachment
+} from "../domain/requirementAttachmentService.js";
 import type { MemoryPipelineStore } from "../store/memoryStore.js";
 
 const createPipelineSchema = z.object({
@@ -12,8 +16,35 @@ const createPipelineSchema = z.object({
   contextPaths: z.array(z.string().min(1)).max(12).optional()
 });
 
+type ParsedCreatePipelineRequest = z.infer<typeof createPipelineSchema> & {
+  requirementAttachments?: RequirementAttachment[];
+};
+
 const rejectSchema = z.object({
   reason: z.string().min(2)
+});
+
+const selectedPreviewElementSchema = z.object({
+  devflowId: z.string().min(1),
+  tagName: z.string().min(1),
+  text: z.string(),
+  className: z.string().optional(),
+  file: z.string().optional(),
+  selector: z.string().optional(),
+  bounds: z
+    .object({
+      x: z.number(),
+      y: z.number(),
+      width: z.number(),
+      height: z.number()
+    })
+    .optional()
+});
+
+const refineSchema = z.object({
+  stageId: z.string().min(1).optional(),
+  instruction: z.string().min(2),
+  selectedElement: selectedPreviewElementSchema
 });
 
 export async function registerPipelineRoutes(
@@ -34,7 +65,7 @@ export async function registerPipelineRoutes(
       summary: "Create a pipeline run"
     }
   }, async (request, reply) => {
-    const body = createPipelineSchema.parse(request.body);
+    const body = await parseCreatePipelineRequest(request);
     const now = new Date().toISOString();
     const pipeline: PipelineRun = {
       id: crypto.randomUUID(),
@@ -42,6 +73,7 @@ export async function registerPipelineRoutes(
       requirement: body.requirement,
       targetRepoPath: body.targetRepoPath,
       contextPaths: body.contextPaths,
+      requirementAttachments: body.requirementAttachments,
       status: "draft",
       stages: createDefaultStages(),
       createdAt: now,
@@ -51,7 +83,10 @@ export async function registerPipelineRoutes(
           id: crypto.randomUUID(),
           type: "pipeline_created",
           message: "Pipeline 已创建，等待启动。",
-          createdAt: now
+          createdAt: now,
+          details: {
+            attachments: body.requirementAttachments?.length ?? 0
+          }
         }
       ]
     };
@@ -117,4 +152,99 @@ export async function registerPipelineRoutes(
     const body = rejectSchema.parse(request.body);
     return runner.reject(id, stageId, body.reason);
   });
+
+  app.post("/api/pipelines/:id/refine", {
+    schema: {
+      tags: ["pipelines"],
+      summary: "Apply a preview feedback refinement"
+    }
+  }, async (request) => {
+    const { id } = request.params as { id: string };
+    const body = refineSchema.parse(request.body);
+    return runner.refine(id, body);
+  });
+}
+
+async function parseCreatePipelineRequest(request: FastifyRequest): Promise<ParsedCreatePipelineRequest> {
+  if (!request.isMultipart()) {
+    return {
+      ...createPipelineSchema.parse(request.body),
+      requirementAttachments: []
+    };
+  }
+
+  const fields: Record<string, string> = {};
+  const files: UploadedRequirementAttachment[] = [];
+
+  for await (const part of request.parts()) {
+    if (part.type === "file") {
+      const buffer = await part.toBuffer();
+
+      if (part.fieldname === "attachments" && part.filename && buffer.length > 0) {
+        files.push({
+          fileName: sanitizeFileName(part.filename),
+          mimeType: part.mimetype,
+          buffer
+        });
+      }
+
+      continue;
+    }
+
+    fields[part.fieldname] = stringifyFieldValue(part.value);
+  }
+
+  const parsed = createPipelineSchema.parse({
+    name: emptyToUndefined(fields.name),
+    requirement: fields.requirement,
+    targetRepoPath: emptyToUndefined(fields.targetRepoPath),
+    contextPaths: parseContextPathsField(fields.contextPaths)
+  });
+
+  return {
+    ...parsed,
+    requirementAttachments: await parseRequirementAttachments(files)
+  };
+}
+
+function parseContextPathsField(value: string | undefined): string[] | undefined {
+  if (!value?.trim()) {
+    return undefined;
+  }
+
+  const trimmed = value.trim();
+
+  if (trimmed.startsWith("[")) {
+    const parsed = safeParseJson(trimmed);
+
+    if (Array.isArray(parsed)) {
+      return parsed.map((item) => String(item).trim()).filter(Boolean);
+    }
+  }
+
+  return trimmed
+    .split(/\r?\n|,/)
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+function stringifyFieldValue(value: unknown): string {
+  return typeof value === "string" ? value : String(value ?? "");
+}
+
+function emptyToUndefined(value: string | undefined): string | undefined {
+  const trimmed = value?.trim();
+  return trimmed ? trimmed : undefined;
+}
+
+function sanitizeFileName(fileName: string): string {
+  return fileName.replace(/\\/g, "/").split("/").pop()?.trim() || "attachment";
+}
+
+function safeParseJson(value: string): unknown {
+  try {
+    return JSON.parse(value) as unknown;
+  } catch {
+    return undefined;
+  }
 }

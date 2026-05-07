@@ -1,4 +1,5 @@
 import type { PipelineStage } from "@devflow/shared";
+import { getDefaultSkillsForRole } from "../agents/agentPrompts.js";
 
 export function createDefaultStages(): PipelineStage[] {
   return [
@@ -7,6 +8,7 @@ export function createDefaultStages(): PipelineStage[] {
       name: "需求分析",
       kind: "agent",
       agentRole: "requirements_analyst",
+      skills: getDefaultSkillsForRole("requirements_analyst"),
       status: "pending",
       retryCount: 0,
       maxRetries: 2
@@ -16,6 +18,7 @@ export function createDefaultStages(): PipelineStage[] {
       name: "方案设计",
       kind: "agent",
       agentRole: "solution_architect",
+      skills: getDefaultSkillsForRole("solution_architect"),
       dependsOn: ["requirement-analysis"],
       status: "pending",
       retryCount: 0,
@@ -35,6 +38,7 @@ export function createDefaultStages(): PipelineStage[] {
       name: "代码生成",
       kind: "agent",
       agentRole: "coder",
+      skills: getDefaultSkillsForRole("coder"),
       dependsOn: ["design-approval"],
       status: "pending",
       retryCount: 0,
@@ -45,6 +49,7 @@ export function createDefaultStages(): PipelineStage[] {
       name: "测试生成",
       kind: "agent",
       agentRole: "test_engineer",
+      skills: getDefaultSkillsForRole("test_engineer"),
       dependsOn: ["code-generation"],
       status: "pending",
       retryCount: 0,
@@ -55,6 +60,7 @@ export function createDefaultStages(): PipelineStage[] {
       name: "代码评审",
       kind: "agent",
       agentRole: "reviewer",
+      skills: getDefaultSkillsForRole("reviewer"),
       dependsOn: ["test-generation"],
       status: "pending",
       retryCount: 0,
@@ -74,6 +80,7 @@ export function createDefaultStages(): PipelineStage[] {
       name: "交付集成",
       kind: "agent",
       agentRole: "delivery_manager",
+      skills: getDefaultSkillsForRole("delivery_manager"),
       dependsOn: ["release-approval"],
       status: "pending",
       retryCount: 0,

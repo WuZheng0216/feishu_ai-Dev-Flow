@@ -18,6 +18,13 @@ export type StageStatus =
 
 export type StageKind = "agent" | "checkpoint";
 
+export type StageSubTaskStatus =
+  | "pending"
+  | "running"
+  | "completed"
+  | "failed"
+  | "skipped";
+
 export type AgentRole =
   | "requirements_analyst"
   | "solution_architect"
@@ -25,6 +32,24 @@ export type AgentRole =
   | "test_engineer"
   | "reviewer"
   | "delivery_manager";
+
+export type AgentSkill =
+  | "requirement_structuring"
+  | "code_context_reading"
+  | "solution_decomposition"
+  | "parallel_task_planning"
+  | "diff_planning"
+  | "workspace_editing"
+  | "test_strategy"
+  | "risk_review"
+  | "preview_refinement"
+  | "delivery_summary";
+
+export interface AgentSkillProfile {
+  id: AgentSkill;
+  name: string;
+  description: string;
+}
 
 export interface StageArtifact {
   title: string;
@@ -71,12 +96,24 @@ export interface CodeContextSnapshot {
   };
 }
 
+export interface RequirementAttachment {
+  id: string;
+  fileName: string;
+  mimeType: string;
+  sizeBytes: number;
+  extractedText: string;
+  summary: string;
+  truncated: boolean;
+  skippedReason?: string;
+}
+
 export interface PipelineStage {
   id: string;
   name: string;
   kind: StageKind;
   status: StageStatus;
   agentRole?: AgentRole;
+  skills?: AgentSkill[];
   dependsOn?: string[];
   retryCount: number;
   maxRetries: number;
@@ -85,7 +122,23 @@ export interface PipelineStage {
   artifact?: StageArtifact;
   stream?: StageStream;
   codeContext?: CodeContextSnapshot;
+  subTasks?: StageSubTask[];
   humanDecision?: HumanDecision;
+}
+
+export interface StageSubTask {
+  id: string;
+  title: string;
+  agentRole: AgentRole;
+  status: StageSubTaskStatus;
+  skills?: AgentSkill[];
+  scope: string[];
+  dependsOn?: string[];
+  parallelGroup?: string;
+  startedAt?: string;
+  completedAt?: string;
+  artifact?: StageArtifact;
+  error?: string;
 }
 
 export interface HumanDecision {
@@ -100,9 +153,13 @@ export type PipelineEventType =
   | "stage_started"
   | "stage_completed"
   | "stage_failed"
+  | "subtask_started"
+  | "subtask_completed"
+  | "subtask_failed"
   | "checkpoint_waiting"
   | "checkpoint_approved"
   | "checkpoint_rejected"
+  | "preview_refined"
   | "pipeline_completed"
   | "pipeline_cancelled";
 
@@ -121,6 +178,7 @@ export interface PipelineRun {
   requirement: string;
   targetRepoPath?: string;
   contextPaths?: string[];
+  requirementAttachments?: RequirementAttachment[];
   status: PipelineStatus;
   stages: PipelineStage[];
   createdAt: string;
@@ -140,6 +198,29 @@ export interface CreatePipelineRequest {
 
 export interface RejectCheckpointRequest {
   reason: string;
+}
+
+export interface PreviewElementBounds {
+  x: number;
+  y: number;
+  width: number;
+  height: number;
+}
+
+export interface SelectedPreviewElement {
+  devflowId: string;
+  tagName: string;
+  text: string;
+  className?: string;
+  file?: string;
+  selector?: string;
+  bounds?: PreviewElementBounds;
+}
+
+export interface RefinePipelineRequest {
+  stageId?: string;
+  instruction: string;
+  selectedElement: SelectedPreviewElement;
 }
 
 export interface ApiErrorResponse {
